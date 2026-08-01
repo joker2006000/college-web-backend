@@ -23,7 +23,9 @@ const s3Client = new S3Client({
     }
 });
 
-// Configure Multer Storage for file uploads
+
+
+// Configure Multer Storage for file uploads (using memory storage for direct buffer upload to S3)
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
 
@@ -37,7 +39,6 @@ const pool = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 10
 });
-
 (async () => {
     try {
         const connection = await pool.getConnection();
@@ -80,6 +81,7 @@ app.post('/api/auth', upload.single('profilePic'), async (req, res) => {
     const { action, uid, pass, adminId, name, mobile, email } = req.body;
 
     try {
+        // --- STUDENT LOGIN ---
         if (action === 'login') {
             const [rows] = await pool.query('SELECT * FROM Students WHERE uid = ?', [uid]);
             if (rows.length === 0) return res.json({ success: false, message: 'Invalid UID or Password.' });
@@ -92,6 +94,7 @@ app.post('/api/auth', upload.single('profilePic'), async (req, res) => {
             return res.json({ success: true, token, message: 'Login successful' });
         }
 
+        // --- ADMIN LOGIN ---
         if (action === 'admin_login') {
             const [rows] = await pool.query('SELECT * FROM Admins WHERE admin_id = ?', [adminId]);
             if (rows.length === 0 || rows[0].password !== pass) {
@@ -102,6 +105,7 @@ app.post('/api/auth', upload.single('profilePic'), async (req, res) => {
             return res.json({ success: true, token, message: 'Admin Login successful' });
         }
 
+        // --- STUDENT REGISTRATION ---
         if (action === 'register') {
             const [existing] = await pool.query('SELECT * FROM Students WHERE uid = ? OR email = ?', [uid, email]);
             if (existing.length > 0) {
@@ -129,6 +133,7 @@ app.post('/api/auth', upload.single('profilePic'), async (req, res) => {
             return res.json({ success: true, message: 'Registration successful!' });
         }
 
+        // --- FORGOT PASSWORD ---
         if (action === 'forgot_password') {
             const [rows] = await pool.query('SELECT * FROM Students WHERE uid = ? AND mobile = ?', [uid, mobile]);
             if (rows.length === 0) {
@@ -147,6 +152,8 @@ app.post('/api/auth', upload.single('profilePic'), async (req, res) => {
 /* ==========================================================
    2. STUDENT PROFILE & PUBLIC EVENTS API
    ========================================================== */
+
+// Get Logged-in Student Profile
 app.get('/api/user/profile', verifyStudentToken, async (req, res) => {
     try {
         const [rows] = await pool.query('SELECT uid, name, mobile, email, userpic_url, created_at FROM Students WHERE uid = ?', [req.user.uid]);
@@ -168,6 +175,7 @@ app.get('/api/user/profile', verifyStudentToken, async (req, res) => {
     }
 });
 
+// Fetch All Events for Public Portal
 app.get('/api/events', async (req, res) => {
     try {
         const [events] = await pool.query('SELECT event_id AS id, title, description, closing_date AS closingDate, status, pic_url FROM Events');
@@ -177,10 +185,15 @@ app.get('/api/events', async (req, res) => {
     }
 });
 
-app.post('/api/events/register', upload.single('idCardImage'), async (req, res) => {
+// Event Registration Application Submission (SECURED & FIXED FOR S3 UPLOAD)
+app.post('/api/events/register', verifyStudentToken, upload.single('idCardImage'), async (req, res) => {
     try {
         const { eventId, fullName, mobileNo, email, department, gender, address } = req.body;
 
+        // Since the user is verified by verifyStudentToken, we ALREADY know their exact UID!
+        const uid = req.user.uid; 
+
+        // AWS S3 Upload for ID Card
         let idCardUrl = '';
         if (req.file) {
             const fileName = `ids/${Date.now()}-${Math.round(Math.random() * 1E9)}${path.extname(req.file.originalname)}`;
@@ -194,16 +207,7 @@ app.post('/api/events/register', upload.single('idCardImage'), async (req, res) 
             idCardUrl = `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileName}`;
         }
 
-        let [studentRows] = await pool.query('SELECT uid FROM Students WHERE email = ?', [email]);
-        let uid = studentRows.length > 0 ? studentRows[0].uid : null;
-
-        if (!uid) {
-            uid = 'GUEST-' + Math.floor(1000 + Math.random() * 9000);
-            const dummyHash = await bcrypt.hash('123456', 10);
-            await pool.query('INSERT IGNORE INTO Students (uid, name, mobile, email, password) VALUES (?, ?, ?, ?, ?)',
-                [uid, fullName, mobileNo, email, dummyHash]);
-        }
-
+        // Directly insert using the verified UID
         await pool.query(
             `INSERT INTO Applications (event_id, uid, department, gender, address, id_card_url) 
              VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE department=?, gender=?, address=?`,
@@ -220,6 +224,8 @@ app.post('/api/events/register', upload.single('idCardImage'), async (req, res) 
 /* ==========================================================
    3. ADMIN MANAGEMENT API ENDPOINTS (/api/admin)
    ========================================================== */
+
+// Admin Home Summary / Dashboard Events
 app.get('/api/admin/events', verifyAdminToken, async (req, res) => {
     try {
         const [events] = await pool.query('SELECT event_id AS id, title, description, closing_date AS closingDate, status, pic_url FROM Events');
@@ -236,6 +242,7 @@ app.get('/api/admin/events', verifyAdminToken, async (req, res) => {
     }
 });
 
+// Manage Events list view endpoint
 app.get('/api/admin/manage-events', verifyAdminToken, async (req, res) => {
     try {
         const [events] = await pool.query('SELECT event_id AS id, title, description, closing_date AS closingDate, status, pic_url FROM Events');
@@ -245,10 +252,12 @@ app.get('/api/admin/manage-events', verifyAdminToken, async (req, res) => {
     }
 });
 
+// Add New Event (FIXED FOR S3 UPLOAD)
 app.post('/api/admin/events', verifyAdminToken, upload.single('eventPic'), async (req, res) => {
     try {
         const { title, description, closingDate } = req.body;
 
+        // AWS S3 Upload for Event Picture
         let picUrl = 'placeholder.jpg';
         if (req.file) {
             const fileName = `events/${Date.now()}-${Math.round(Math.random() * 1E9)}${path.extname(req.file.originalname)}`;
@@ -274,6 +283,7 @@ app.post('/api/admin/events', verifyAdminToken, upload.single('eventPic'), async
     }
 });
 
+// Toggle Event Status (Active / Paused)
 app.patch('/api/admin/events/:id/toggle-status', verifyAdminToken, async (req, res) => {
     try {
         const { status } = req.body;
@@ -284,16 +294,22 @@ app.patch('/api/admin/events/:id/toggle-status', verifyAdminToken, async (req, r
     }
 });
 
+// Delete Event
 app.delete('/api/admin/events/:id', verifyAdminToken, async (req, res) => {
     try {
+        // 1. Fetch the event to check for an associated S3 image
         const [eventRows] = await pool.query('SELECT pic_url FROM Events WHERE event_id = ?', [req.params.id]);
 
         if (eventRows.length > 0) {
             const picUrl = eventRows[0].pic_url;
 
+            // 2. Check if the URL points to an actual S3 file (not the placeholder)
             if (picUrl && picUrl !== 'placeholder.jpg' && picUrl.includes('amazonaws.com')) {
+                // Extract the file path (key) from the URL by removing the domain part
                 const urlObj = new URL(picUrl);
-                const fileKey = urlObj.pathname.substring(1); 
+                const fileKey = urlObj.pathname.substring(1); // Removes the leading '/'
+
+                // 3. Delete the object from the S3 bucket
                 const deleteParams = {
                     Bucket: process.env.AWS_BUCKET_NAME,
                     Key: fileKey
@@ -302,6 +318,7 @@ app.delete('/api/admin/events/:id', verifyAdminToken, async (req, res) => {
             }
         }
 
+        // 4. Delete the event from the MySQL database
         await pool.query('DELETE FROM Events WHERE event_id = ?', [req.params.id]);
         res.json({ success: true, message: 'Event, related applications, and S3 image deleted successfully.' });
     } catch (err) {
@@ -310,7 +327,15 @@ app.delete('/api/admin/events/:id', verifyAdminToken, async (req, res) => {
     }
 });
 
+// Fetch Applications by Event ID and Department
 app.get('/api/admin/events/:id/applications', verifyAdminToken, async (req, res) => {
+    // FRONTEND TODO:
+    // Admin dashboard should call this API
+    // Show approve button
+    // Show decline button
+    // Show decline reason textbox
+    // Display student uploaded ID image
+    // Display colored status badge
     try {
         const { department } = req.query;
         let query = `
@@ -345,22 +370,27 @@ app.get('/api/admin/events/:id/applications', verifyAdminToken, async (req, res)
 
 // --- STUDENT APIs ---
 
+// Get all applications for the logged-in student
 app.get('/api/user/applications', verifyStudentToken, async (req, res) => {
+    // FRONTEND TODO:
+    // My Applications page
+    // Display cards
+    // Show uploaded ID image
+    // Show status badge
+    // Show decline reason
+    // Show delete button only if declined
     try {
-        // [MODIFICATION APPLIED]: Removed unused fields given to frontend (description, closing_date, applied_on, updated_at). 
-        // Also added COALESCE for status to safely default to 'under_checking' if the database has it as NULL.
         const query = `
             SELECT 
-                a.application_id, e.title, e.pic_url,
+                a.application_id, e.event_id, e.title, e.description, e.closing_date, e.pic_url,
                 s.uid, s.name, s.email, s.mobile,
-                a.department, a.gender, a.address, a.id_card_url, 
-                COALESCE(a.status, 'under_checking') AS status, 
-                a.decline_reason
+                a.department, a.gender, a.address, a.id_card_url, a.applied_on,
+                a.status, a.decline_reason, a.updated_at
             FROM Applications a
             JOIN Students s ON a.uid = s.uid
             JOIN Events e ON a.event_id = e.event_id
             WHERE a.uid = ?
-            ORDER BY a.application_id DESC
+            ORDER BY a.applied_on DESC
         `;
         const [applications] = await pool.query(query, [req.user.uid]);
         res.json({ success: true, applications });
@@ -370,10 +400,12 @@ app.get('/api/user/applications', verifyStudentToken, async (req, res) => {
     }
 });
 
+// Delete a declined application
 app.delete('/api/user/applications/:applicationId', verifyStudentToken, async (req, res) => {
     try {
         const { applicationId } = req.params;
 
+        // Fetch application to check ownership and status
         const [rows] = await pool.query('SELECT uid, status, id_card_url FROM Applications WHERE application_id = ?', [applicationId]);
 
         if (rows.length === 0) {
@@ -382,15 +414,21 @@ app.delete('/api/user/applications/:applicationId', verifyStudentToken, async (r
 
         const appRecord = rows[0];
 
+        // Ensure the student owns this application
         if (appRecord.uid !== req.user.uid) {
             return res.status(403).json({ success: false, message: 'Unauthorized to delete this application.' });
         }
 
-        // [MODIFICATION APPLIED]: Strictly checks if it is NOT declined, preventing unexpected behaviour if status was null.
-        if (appRecord.status !== 'declined') {
+        // Ensure application is declined
+        if (appRecord.status === 'selected' || appRecord.status === 'under_checking') {
             return res.status(400).json({ success: false, message: 'Only declined applications can be deleted.' });
         }
 
+        // TODO: Future requirement - If AWS S3 cleanup is needed, delete the object using:
+        // const fileKey = new URL(appRecord.id_card_url).pathname.substring(1);
+        // await s3Client.send(new DeleteObjectCommand({ Bucket: process.env.AWS_BUCKET_NAME, Key: fileKey }));
+
+        // Delete from database
         await pool.query('DELETE FROM Applications WHERE application_id = ?', [applicationId]);
         res.json({ success: true, message: 'Application deleted successfully.' });
 
@@ -400,9 +438,18 @@ app.delete('/api/user/applications/:applicationId', verifyStudentToken, async (r
     }
 });
 
+
 // --- ADMIN APIs ---
 
+// Update application status
 app.patch('/api/admin/applications/:applicationId/status', verifyAdminToken, async (req, res) => {
+    // FRONTEND TODO:
+    // Admin dashboard should call this API
+    // Show approve button
+    // Show decline button
+    // Show decline reason textbox
+    // Display student uploaded ID image
+    // Display colored status badge
     try {
         const { applicationId } = req.params;
         let { status, decline_reason } = req.body;
@@ -412,6 +459,7 @@ app.patch('/api/admin/applications/:applicationId/status', verifyAdminToken, asy
             return res.status(400).json({ success: false, message: 'Invalid status provided.' });
         }
 
+        // Handle auto-nulling and required reasons based on status
         if (status === 'selected') {
             decline_reason = null;
         } else if (status === 'declined') {
@@ -431,6 +479,7 @@ app.patch('/api/admin/applications/:applicationId/status', verifyAdminToken, asy
             return res.status(404).json({ success: false, message: 'Application not found.' });
         }
 
+       // Fetch and return the updated application
         const [updatedRows] = await pool.query('SELECT * FROM Applications WHERE application_id = ?', [applicationId]);
 
         res.json({
