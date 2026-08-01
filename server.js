@@ -348,7 +348,7 @@ app.get('/api/admin/events/:id/applications', verifyAdminToken, async (req, res)
             SELECT 
                 a.application_id, s.name, s.uid, s.mobile, s.email, 
                 a.gender, a.department, a.address, a.id_card_url,
-                a.status, a.decline_reason, a.updated_at, a.reviewed_by,
+                a.status, a.decline_reason, a.updated_at,
                 e.event_id, e.title
             FROM Applications a 
             JOIN Students s ON a.uid = s.uid 
@@ -411,6 +411,7 @@ app.delete('/api/user/applications/:applicationId', verifyStudentToken, async (r
     try {
         const { applicationId } = req.params;
 
+        // Fetch application to check ownership and status
         const [rows] = await pool.query('SELECT uid, status, id_card_url FROM Applications WHERE application_id = ?', [applicationId]);
 
         if (rows.length === 0) {
@@ -419,14 +420,21 @@ app.delete('/api/user/applications/:applicationId', verifyStudentToken, async (r
 
         const appRecord = rows[0];
 
+        // Ensure the student owns this application
         if (appRecord.uid !== req.user.uid) {
             return res.status(403).json({ success: false, message: 'Unauthorized to delete this application.' });
         }
 
+        // Ensure application is declined
         if (appRecord.status === 'selected' || appRecord.status === 'under_checking') {
             return res.status(400).json({ success: false, message: 'Only declined applications can be deleted.' });
         }
 
+        // TODO: Future requirement - If AWS S3 cleanup is needed, delete the object using:
+        // const fileKey = new URL(appRecord.id_card_url).pathname.substring(1);
+        // await s3Client.send(new DeleteObjectCommand({ Bucket: process.env.AWS_BUCKET_NAME, Key: fileKey }));
+
+        // Delete from database
         await pool.query('DELETE FROM Applications WHERE application_id = ?', [applicationId]);
         res.json({ success: true, message: 'Application deleted successfully.' });
 
@@ -468,11 +476,9 @@ app.patch('/api/admin/applications/:applicationId/status', verifyAdminToken, asy
             decline_reason = null;
         }
 
-        const adminId = req.user.adminId; // Extracted from verifyAdminToken middleware
-
         const [updateResult] = await pool.query(
-            'UPDATE Applications SET status = ?, decline_reason = ?, reviewed_by = ? WHERE application_id = ?',
-            [status, decline_reason, adminId, applicationId]
+            'UPDATE Applications SET status = ?, decline_reason = ? WHERE application_id = ?',
+            [status, decline_reason, applicationId]
         );
 
         if (updateResult.affectedRows === 0) {
