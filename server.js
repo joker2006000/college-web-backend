@@ -297,33 +297,64 @@ app.patch('/api/admin/events/:id/toggle-status', verifyAdminToken, async (req, r
 // Delete Event
 app.delete('/api/admin/events/:id', verifyAdminToken, async (req, res) => {
     try {
-        // 1. Fetch the event to check for an associated S3 image
-        const [eventRows] = await pool.query('SELECT pic_url FROM Events WHERE event_id = ?', [req.params.id]);
+        const eventId = req.params.id;
+
+        // 1. Fetch all applications for this event to get uploaded S3 pictures
+        const [appRows] = await pool.query('SELECT id_card_url FROM Applications WHERE event_id = ?', [eventId]);
+
+        // 2. Delete all student application ID images from AWS S3
+        for (const application of appRows) {
+            const idCardUrl = application.id_card_url;
+            if (idCardUrl && idCardUrl.includes('amazonaws.com')) {
+                try {
+                    const urlObj = new URL(idCardUrl);
+                    const fileKey = urlObj.pathname.substring(1); // Removes leading '/'
+
+                    await s3Client.send(new DeleteObjectCommand({
+                        Bucket: process.env.AWS_BUCKET_NAME,
+                        Key: fileKey
+                    }));
+                } catch (s3Err) {
+                    console.error("Failed to delete application S3 image:", s3Err);
+                }
+            }
+        }
+
+        // 3. Delete all application records for this event from the Applications table
+        await pool.query('DELETE FROM Applications WHERE event_id = ?', [eventId]);
+
+        // 4. Fetch the event details to delete its banner picture from S3
+        const [eventRows] = await pool.query('SELECT pic_url FROM Events WHERE event_id = ?', [eventId]);
 
         if (eventRows.length > 0) {
             const picUrl = eventRows[0].pic_url;
 
-            // 2. Check if the URL points to an actual S3 file (not the placeholder)
             if (picUrl && picUrl !== 'placeholder.jpg' && picUrl.includes('amazonaws.com')) {
-                // Extract the file path (key) from the URL by removing the domain part
-                const urlObj = new URL(picUrl);
-                const fileKey = urlObj.pathname.substring(1); // Removes the leading '/'
+                try {
+                    const urlObj = new URL(picUrl);
+                    const fileKey = urlObj.pathname.substring(1);
 
-                // 3. Delete the object from the S3 bucket
-                const deleteParams = {
-                    Bucket: process.env.AWS_BUCKET_NAME,
-                    Key: fileKey
-                };
-                await s3Client.send(new DeleteObjectCommand(deleteParams));
+                    await s3Client.send(new DeleteObjectCommand({
+                        Bucket: process.env.AWS_BUCKET_NAME,
+                        Key: fileKey
+                    }));
+                } catch (s3Err) {
+                    console.error("Failed to delete event S3 image:", s3Err);
+                }
             }
         }
 
-        // 4. Delete the event from the MySQL database
-        await pool.query('DELETE FROM Events WHERE event_id = ?', [req.params.id]);
-        res.json({ success: true, message: 'Event, related applications, and S3 image deleted successfully.' });
+        // 5. Delete the event from the MySQL database
+        await pool.query('DELETE FROM Events WHERE event_id = ?', [eventId]);
+
+        res.json({ 
+            success: true, 
+            message: 'Event, associated user applications, and all S3 images deleted successfully.' 
+        });
+
     } catch (err) {
         console.error("Error deleting event:", err);
-        res.status(500).json({ success: false, message: 'Failed to delete event.' });
+        res.status(500).json({ success: false, message: 'Failed to delete event and related data.' });
     }
 });
 
